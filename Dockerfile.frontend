@@ -1,0 +1,8 @@
+FROM node:22
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend ./
+EXPOSE 5151
+ENV PATH="/app/frontend/node_modules/.bin:$PATH"
+CMD sh -c "react-scripts start"

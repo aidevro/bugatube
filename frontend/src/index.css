@@ -1,0 +1,10 @@
+/* Basic styles for BugaTube */
+body {
+  margin: 0;
+  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
+  background: linear-gradient(135deg, #e6f0ff 0%, #ffe6f0 100%);
+}
+
+a {
+  text-decoration: none;
+}
