@@ -33,6 +33,8 @@ const validateObjectId = (id) => {
   return mongoose.Types.ObjectId.isValid(id);
 };
 
+let totalDurationSec = null;
+
 const encodeVideo = (inputPath, outputPath, width, bitrate, videoId, stage, totalStages) => {
   const process = spawn('ffmpeg', [
     '-vaapi_device', '/dev/dri/renderD128',
@@ -44,24 +46,38 @@ const encodeVideo = (inputPath, outputPath, width, bitrate, videoId, stage, tota
   ]);
 
   return new Promise((resolve, reject) => {
-    process.stdout.on('data', (data) => {
+    process.stderr.on('data', (data) => {
       const output = data.toString();
+      
+      // Capture total duration from ffmpeg output once
+      if (!totalDurationSec) {
+        const durationMatch = output.match(/Duration: (\d{2}):(\d{2}):(\d{2})/);
+        if (durationMatch) {
+          totalDurationSec = parseInt(durationMatch[1]) * 3600 + parseInt(durationMatch[2]) * 60 + parseInt(durationMatch[3]);
+          console.log(`Total duration for video ${videoId} (${width}p): ${totalDurationSec} seconds`);
+        }
+      }
+
       const timeMatch = output.match(/time=(\d{2}:\d{2}:\d{2}\.\d{2})/);
-      if (timeMatch) {
-        const time = timeMatch[1];
-        const [hours, minutes, seconds] = time.split(':').map(parseFloat);
-        const totalSeconds = hours * 3600 + minutes * 60 + seconds;
-        const duration = 60; // Assume 60 seconds for simplicity; ideally fetch from metadata
-        const progress = Math.min((totalSeconds / duration) * 100, 100);
+      if (timeMatch && totalDurationSec) {
+        const timeParts = timeMatch[1].split(':').map(parseFloat);
+        const currentSec = timeParts[0] * 3600 + timeParts[1] * 60 + timeParts[2];
+        const progress = Math.min((currentSec / totalDurationSec) * 100, 100);
         const stageProgress = (progress / totalStages) + ((stage - 1) * (100 / totalStages));
-        downloadQueue.set(videoId, { ...downloadQueue.get(videoId), progress: stageProgress, stage: `Encoding ${width}p` });
+
+        console.log(`Encoding progress for video ${videoId} (${width}p): ${progress.toFixed(2)}%, Stage Progress: ${stageProgress.toFixed(2)}%`);
+
+        downloadQueue.set(videoId, {
+          ...downloadQueue.get(videoId),
+          progress: stageProgress,
+          stage: `Encoding ${width}p`
+        });
         broadcastQueueUpdate(downloadQueue.get(videoId).userId);
       }
     });
 
-    process.stderr.on('data', (data) => console.error(`ffmpeg stderr (${width}p):`, data.toString()));
-
     process.on('close', (code) => {
+      totalDurationSec = null; // Reset for next call
       if (code !== 0) {
         try {
           execSync(`ffmpeg -i "${inputPath}" -vf scale=${width}:-2 -c:v libx264 -preset veryfast -b:v ${bitrate} "${outputPath}"`);
@@ -135,7 +151,7 @@ router.post('/youtube', authMiddleware, async (req, res) => {
         const uploadDir = path.join('/app/uploads', videoId);
         fs.mkdirSync(uploadDir, { recursive: true });
 
-        const outputPath = path.join(uploadDir, 'video.mp4');
+        const outputPath = path.join('/app/uploads', videoId, 'video.mp4');
         console.log(`Attempting to download ${url} to ${outputPath}`);
 
         const ytDlpProcess = spawn('yt-dlp', [
@@ -147,17 +163,22 @@ router.post('/youtube', authMiddleware, async (req, res) => {
           '--verbose'
         ]);
 
-        ytDlpProcess.stdout.on('data', (data) => {
+        ytDlpProcess.stderr.on('data', (data) => {
           const output = data.toString();
-          console.log('yt-dlp stdout:', output);
-          const progressMatch = output.match(/(\d+\.\d+)%/);
+          const progressMatch = output.match(/\[download\]\s+(\d{1,3}\.\d)%/);
           if (progressMatch) {
-            const progress = parseFloat(progressMatch[1]) * (1 / 3); // Download is 1/3 of the process
-            downloadQueue.set(videoId, { ...downloadQueue.get(videoId), progress, stage: 'Downloading' });
+            const progress = parseFloat(progressMatch[1]) / 3; // Download is 1/3 of the process
+            console.log(`Download progress for video ${videoId}: ${progress.toFixed(2)}%`);
+            downloadQueue.set(videoId, { 
+              ...downloadQueue.get(videoId),
+              progress,
+              stage: 'Downloading'
+            });
             broadcastQueueUpdate(req.user.id);
           }
         });
 
+        ytDlpProcess.stdout.on('data', (data) => console.log('yt-dlp stdout:', data.toString()));
         ytDlpProcess.stderr.on('data', (data) => console.error('yt-dlp stderr:', data.toString()));
 
         await new Promise((resolve, reject) => {
@@ -387,6 +408,7 @@ const broadcastQueueUpdate = (userId) => {
   const userQueue = Array.from(downloadQueue.entries())
     .filter(([_, item]) => item.userId === userId)
     .map(([videoId, item]) => ({ videoId, ...item }));
+  console.log(`Broadcasting queue update to user ${userId}:`, userQueue);
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN && client.userId === userId) {
       client.send(JSON.stringify({ type: 'queueUpdate', queue: userQueue }));
